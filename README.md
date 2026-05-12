@@ -1,86 +1,93 @@
-# DGQT Statistical Arbitrage Bot
+# DGQT Statistical Arbitrage Research
 
-This project develops a statistical arbitrage strategy for Visa (`V`) and Mastercard (`MA`), validates it in notebooks, and converts the same logic into a paper-trading Alpaca bot. The core hypothesis is that the two payment networks have a stable long-term relationship, so temporary deviations in their log-price spread can be traded as a mean-reverting pair.
+This project studies a pairs trading strategy between Visa (`V`) and Mastercard (`MA`). The central idea is that both companies operate in the same payments ecosystem, so their log prices often move together. When the relationship temporarily stretches, the strategy attempts to trade the spread back toward its estimated mean.
 
-The deployed strategy models the spread as:
+The final research direction uses an Ornstein-Uhlenbeck (OU) process on the hedged log-price spread:
 
 ```text
 spread = log(MA) - beta * log(V)
 ```
 
-`beta` is estimated on a rolling hedge window, and the spread is then fit to a discrete Ornstein-Uhlenbeck / AR(1) process. The bot uses the OU mean and stationary volatility to calculate a z-score. A positive z-score means the spread is high relative to its estimated mean; a negative z-score means it is low.
+`beta` is estimated with a rolling regression of `log(MA)` on `log(V)`. This creates a hedge-adjusted spread rather than a simple price difference. A positive position means long `MA` and short beta-adjusted `V`; a negative position means short `MA` and long beta-adjusted `V`.
 
 ![Validation prices](readme_assets/ou_validation_prices.png)
 
 ## OU Validation
 
-The main research notebook is [`ou_validation.ipynb`](ou_validation.ipynb). It loads historical daily CSV data from `V_daily.csv` and `MA_daily.csv`, computes returns and log prices, and applies the OU strategy with the same parameters now used by the bot. The current configuration uses a 252-day hedge lookback, a 378-day OU lookback, entry threshold of `1.0`, exit threshold of `0.75`, emergency stop of `3.9`, and a half-life filter between 1 and 60 trading days.
+The main research notebook is [`ou_validation.ipynb`](ou_validation.ipynb). It extends the earlier statistical arbitrage work by replacing the simple rolling z-score model with an explicit OU/AR(1) estimate of mean reversion. For each trading day, the notebook takes a trailing spread window and fits:
 
-The notebook splits the work into a pre-2020 training/calibration section and a 2020 onward validation section. Regime thresholds are calibrated only on pre-2020 data. This matters because the validation period is meant to test whether the rules still work after the thresholds have already been chosen. The filters require sufficiently high return correlation, stable rolling beta, reasonable OU volatility, and acceptable mean-reversion half-life.
+```text
+X[t+1] = intercept + phi * X[t] + error
+```
 
-On the current local CSV data, the training period runs from March 19, 2008 through December 31, 2019. It produces a Sharpe ratio of about `1.03`, total return of about `46.1%`, maximum drawdown of about `-4.8%`, and 64 position changes. The validation period runs from January 2, 2020 through May 11, 2026. It produces a Sharpe ratio of about `1.52`, total return of about `88.8%`, maximum drawdown of about `-5.5%`, and 78 position changes.
+For a stationary mean-reverting process, `0 < phi < 1`. The notebook converts this fitted AR(1) form into OU-style parameters:
 
-These numbers come from the research backtest and do not prove live profitability. The notebook does not model every real execution cost, borrow constraint, short-sale issue, fill quality problem, or tax effect. It is best read as a strategy validation tool, not as a guarantee.
+```text
+theta = -log(phi)
+mu = intercept / (1 - phi)
+half_life = log(2) / theta
+```
+
+The current spread is then scored as:
+
+```text
+ou_z = (current_spread - ou_mu) / ou_sigma
+```
+
+This matters because the strategy is no longer assuming that every large rolling deviation is equally tradable. It checks whether the spread still looks mean reverting, how quickly it is expected to decay, and whether its estimated stationary volatility is reasonable.
+
+The current OU configuration uses a 252-day hedge lookback, a 378-day OU lookback, entry threshold of `1.0`, exit threshold of `0.75`, emergency stop of `3.9`, and half-life bounds from 1 to 60 trading days. A high positive `ou_z` triggers a short-spread trade: short `MA`, long `V`. A low negative `ou_z` triggers a long-spread trade: long `MA`, short `V`. Positions exit when the spread mean-reverts, hits the emergency stop, or fails the regime checks.
+
+The notebook also calibrates regime filters using only pre-2020 data. These filters require high enough return correlation, stable rolling beta, acceptable OU volatility, and a reasonable half-life. This separation is important: thresholds are learned before the validation period, then tested from 2020 onward.
+
+On the current local CSV data, the OU training period runs from March 19, 2008 through December 31, 2019. It produces a Sharpe ratio of about `1.03`, total return of about `46.1%`, maximum drawdown of about `-4.8%`, and 64 position changes. The validation period runs from January 2, 2020 through May 11, 2026. It produces a Sharpe ratio of about `1.52`, total return of about `88.8%`, maximum drawdown of about `-5.5%`, and 78 position changes.
 
 ![OU signal and position](readme_assets/ou_signal_position.png)
 
-## Manual Trading Notebook
-
-[`manual_trading_sim.ipynb`](manual_trading_sim.ipynb) bridges the research notebook and actual Alpaca paper execution. It uses the same OU parameters from `ou_validation.ipynb`, connects to Alpaca with `TradingClient`, downloads recent daily bars with `StockHistoricalDataClient`, and explicitly requests the free/basic IEX market data feed:
-
-```python
-feed=DataFeed.IEX
-```
-
-The notebook is intentionally manual. It prints the Alpaca account status, computes the latest signal, builds an `order_plan_df`, and then submits market orders only if `SUBMIT_ORDERS = True`. With `PAPER = True`, those orders go to Alpaca paper trading, not live capital. Before executing the order cell, inspect `order_plan_df`; it shows the current position, target quantity, trade quantity, latest price, and trade notional for both `MA` and `V`.
-
-This notebook is useful for development because every step is visible. It is not a continuously running bot. It only trades when you run the cells.
-
 ![Equity and drawdown](readme_assets/ou_equity_drawdown.png)
 
-## Bot Deployment
+![Regime filters](readme_assets/ou_regime_filters.png)
 
-The deployable version lives in [`Algorithmic trading/`](Algorithmic%20trading/). Run only the entrypoint:
+These results are encouraging, but they are still backtest results. They do not fully model slippage, commissions, short borrow availability, tax effects, partial fills, or live order-book behavior.
+
+## Earlier Baseline
+
+Before the OU version, the project tested a simpler statistical arbitrage algorithm in [`basic_iteration/hyperparameter_tuning.ipynb`](basic_iteration/hyperparameter_tuning.ipynb). That model used a rolling hedge ratio, a rolling spread mean, and a rolling spread standard deviation. It entered when the ordinary z-score crossed an entry threshold and exited when it crossed back toward zero.
+
+The baseline was heavily tuned. The notebook swept lookback windows, entry thresholds, exit thresholds, and an emergency stop. The best lookback sweep in the 30-69 day region reached an in-sample Sharpe of about `1.05`. The best entry/exit threshold tile reached an in-sample Sharpe of about `1.25`, with `entry_z = 1.5` and `exit_z = 1.1`. The e-stop sweep peaked around `1.15`.
+
+![Baseline lookback sweep](readme_assets/baseline_lookback_sweep.png)
+
+The seaborn heatmaps below show why this was not fully satisfying. The profitable regions were present, but performance depended heavily on the chosen thresholds. The best tile was not enough evidence that the simple model was robust.
+
+![Baseline threshold heatmaps](readme_assets/baseline_threshold_heatmaps.png)
+
+![Baseline e-stop sweep](readme_assets/baseline_estop_sweep.png)
+
+After validation, the simple strategy was not excellent. The tuned baseline reached only about `0.58` Sharpe from 2020 onward, with about `33.0%` total return, `-11.2%` maximum drawdown, and 214 position changes. Adding regime and noise controls improved it only modestly to about `0.66` Sharpe, with about `33.8%` total return and `-10.3%` maximum drawdown.
+
+![Baseline validation equity](readme_assets/baseline_validation_equity.png)
+
+This is the main reason the project moved toward the OU process. The OU version gives the spread model a more explicit mean-reversion structure, adds half-life awareness, and uses OU stationary volatility rather than only a rolling sample standard deviation.
+
+## Manual Trading Notebook
+
+[`manual_trading_sim.ipynb`](manual_trading_sim.ipynb) connects the research logic to Alpaca paper trading in a controlled notebook format. It loads the same OU parameters, connects with `TradingClient`, requests daily Alpaca bars using the free/basic IEX feed, computes the latest signal, and builds an `order_plan_df`.
+
+Before submitting anything, the notebook shows the current shares, target shares, trade quantity, latest price, and trade notional for both symbols. With `PAPER = True`, any submitted order goes to Alpaca paper trading rather than live capital. This notebook is useful for inspecting one complete trading decision by hand.
+
+## Bot Entrypoint
+
+The deployable script version lives in [`Algorithmic trading/`](Algorithmic%20trading/). Run only:
 
 ```bash
 .venv/bin/python "Algorithmic trading/bot.py"
 ```
 
-`bot.py` imports the other modules automatically:
-
-- `config.py` stores symbols, OU thresholds, filters, exposure, and paper-trading settings.
-- `data.py` loads Alpaca daily bars using `DataFeed.IEX`.
-- `strategy.py` implements the OU feature calculation and signal logic from `ou_validation.ipynb`.
-- `execution.py` loads credentials, checks current Alpaca positions, builds the target order plan, and submits market orders.
-
-The bot requires Alpaca API keys. The recommended deployment method is environment variables:
-
-```bash
-export ALPACA_API_KEY="your_key"
-export ALPACA_SECRET_KEY="your_secret"
-export ALPACA_PAPER=true
-```
-
-It can also fall back to the project-level `alpaca_keys.py` file. The bot is designed for paper trading and prints the paper endpoint:
-
-```text
-https://paper-api.alpaca.markets/v2
-```
-
-By default, `SUBMIT_ORDERS` is true. For a safe preview, run:
+For a preview without submitting paper orders:
 
 ```bash
 SUBMIT_ORDERS=false .venv/bin/python "Algorithmic trading/bot.py"
 ```
 
-That command computes the latest signal and order plan without placing paper orders. After reviewing the output, run the normal command to submit paper trades.
-
-Because the strategy uses daily bars, it should usually be scheduled once per trading day rather than run in a tight loop. A local cron example for weekdays near the close is:
-
-```cron
-50 14 * * 1-5 cd /Users/dhimanroy/Projects/PythonProject/DGQT_algo && ALPACA_PAPER=true SUBMIT_ORDERS=true .venv/bin/python "Algorithmic trading/bot.py" >> "Algorithmic trading/bot.log" 2>&1
-```
-
 The best workflow is: research changes in `ou_validation.ipynb`, inspect live behavior in `manual_trading_sim.ipynb`, then schedule `bot.py` after the order plan looks correct.
-
-![Regime filters](readme_assets/ou_regime_filters.png)
