@@ -14,7 +14,7 @@ spread = log(MA) - beta * log(V)
 
 ## OU Validation
 
-The main research notebook is [`ou_validation.ipynb`](ou_validation.ipynb). It extends the earlier statistical arbitrage work by replacing the simple rolling z-score model with an explicit OU/AR(1) estimate of mean reversion. For each trading day, the notebook takes a trailing spread window and fits:
+The main research notebook is [`ou_validation.ipynb`](primary_research.ipynb). It extends the earlier statistical arbitrage work by replacing the simple rolling z-score model with an explicit OU/AR(1) estimate of mean reversion. For each trading day, the notebook takes a trailing spread window and fits:
 
 ```text
 X[t+1] = intercept + phi * X[t] + error
