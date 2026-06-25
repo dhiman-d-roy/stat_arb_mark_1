@@ -1,93 +1,237 @@
 # DGQT Statistical Arbitrage Research
 
-This project studies a pairs trading strategy between Visa (`V`) and Mastercard (`MA`). The central idea is that both companies operate in the same payments ecosystem, so their log prices often move together. When the relationship temporarily stretches, the strategy attempts to trade the spread back toward its estimated mean.
+This repository researches a systematic pairs-trading strategy for liquid equity and ETF pairs. The current implementation separates the workflow into two layers:
 
-The final research direction uses an Ornstein-Uhlenbeck (OU) process on the hedged log-price spread:
+- `Tuner` in `tuning.py`: monthly research and parameter selection.
+- `PairsTradingStrategy` in `strategy.py`: daily signal generation, regime checks, sizing, and risk controls.
+
+The main idea is simple: some related securities often move together because they share common economic drivers. Examples include `V/MA`, `XOM/CVX`, `JPM/BAC`, `GOOG/GOOGL`, `SPY/IVV`, and `GLD/IAU`. When the relationship temporarily stretches, the strategy attempts to trade the spread back toward its estimated equilibrium.
+
+The important caveat is that cointegration is not treated as a permanent trait. A pair can look cointegrated in one market regime and fail in another. A stable relationship from 2015 to 2018 does not imply the same relationship survived 2020, 2022, or 2025. For that reason the strategy does not select pairs once and assume they are valid forever. It retunes and reselects active pairs every month using a trailing historical window, and it also checks daily whether each active pair still passes regime filters.
+
+## Repository Layout
+
+`tuning.py`
+
+Defines the `Tuner` class. This class owns the monthly workflow:
+
+- tune Kalman filter process/measurement noise parameters, `q_alpha`, `q_beta`, and `r`
+- tune z-score lookback
+- tune entry and exit z-score thresholds
+- tune a whole universe of candidate pairs with `Tuner.tune_universe(...)`
+- return the active pairs and tuned parameter table used by the live daily strategy
+
+`strategy.py`
+
+Defines the `PairsTradingStrategy` class. This class owns the daily workflow:
+
+- update the Kalman hedge ratio
+- update the spread and z-score
+- check cointegration and mean-reversion regime filters
+- generate a target long/short/flat signal
+- size the signal by spread volatility
+- apply pair-level and portfolio-level risk limits
+- estimate transaction costs
+
+`backtest.ipynb`
+
+Runs the full strategy from the start of 2023 through the end of 2025. It retunes monthly, trades daily, computes gross and net P&L, applies transaction costs, calculates risk-free-rate-adjusted Sharpe ratios, and produces portfolio and pair-level diagnostics.
+
+`primary_research.ipynb`
+
+Research notebook for screening pairs, checking cointegration, checking mean reversion, and experimenting with Kalman-spread behavior.
+
+`hyperparameter_tuning.ipynb`
+
+Notebook version of the tuning workflow. The reusable implementation now lives in `tuning.py`, so this notebook is mostly useful for interactive exploration.
+
+`downloader.ipynb`
+
+Data download notebook for updating the CSV files in `Data/`.
+
+`Data/`
+
+Daily adjusted-close CSV files used by the research and backtests.
+
+## Strategy Intuition
+
+The strategy models a pair as two log-price series:
 
 ```text
-spread = log(MA) - beta * log(V)
+y = log(price of first asset)
+x = log(price of second asset)
+spread = y - alpha - beta * x
 ```
 
-`beta` is estimated with a rolling regression of `log(MA)` on `log(V)`. This creates a hedge-adjusted spread rather than a simple price difference. A positive position means long `MA` and short beta-adjusted `V`; a negative position means short `MA` and long beta-adjusted `V`.
+If the spread is stationary and mean reverting, then unusually high or low spread values may represent temporary dislocations. A positive spread means `y` is high relative to `x`; a negative spread means `y` is low relative to `x`.
 
-![Validation prices](readme_assets/ou_validation_prices.png)
+The trading logic is:
 
-## OU Validation
+- if z-score is high, short the spread
+- if z-score is low, long the spread
+- exit when the z-score reverts toward zero
+- stay flat when the pair fails regime checks
 
-The main research notebook is [`ou_validation.ipynb`](primary_research.ipynb). It extends the earlier statistical arbitrage work by replacing the simple rolling z-score model with an explicit OU/AR(1) estimate of mean reversion. For each trading day, the notebook takes a trailing spread window and fits:
+The strategy uses log prices rather than raw prices because log-price differences map more naturally to relative moves.
+
+## Why Cointegration Is Treated As Temporary
+
+Cointegration tests ask whether a linear combination of two non-stationary price series is stationary over a chosen sample. The phrase "over a chosen sample" matters. A pair can pass the test from 2015 to 2018 and fail from 2010 to 2018 because the longer period may include a different market regime, changed business fundamentals, changes in index construction, different volatility conditions, or structural breaks.
+
+That does not mean train/validation/test splitting is wrong. It means the strategy must be honest about time variation. The current design handles this in two ways:
+
+- monthly selection uses only trailing data available before the rebalance date
+- daily regime filters can force a tuned pair flat if its relationship no longer looks tradable
+
+This is the core research assumption of the repository: statistical relationships are candidates, not facts.
+
+## Why A Kalman Filter Is Used
+
+A static hedge ratio assumes the relationship between the two assets is constant:
 
 ```text
-X[t+1] = intercept + phi * X[t] + error
+y = alpha + beta * x + residual
 ```
 
-For a stationary mean-reverting process, `0 < phi < 1`. The notebook converts this fitted AR(1) form into OU-style parameters:
+That is usually too rigid for equities. Sector exposures, balance sheets, macro sensitivity, index flows, and idiosyncratic news all change over time. The Kalman filter gives the hedge relationship a controlled way to drift.
+
+The state is:
 
 ```text
-theta = -log(phi)
-mu = intercept / (1 - phi)
-half_life = log(2) / theta
+theta = [alpha, beta]
 ```
 
-The current spread is then scored as:
+Each day, the filter predicts the current relationship, observes the latest pair prices, and updates `alpha` and `beta`. The tuning parameters control how flexible the filter is:
+
+- `q_alpha`: how quickly the intercept can move
+- `q_beta`: how quickly the hedge ratio can move
+- `r`: how noisy the observation is assumed to be
+
+If `q_alpha` and `q_beta` are too small, the filter is too slow and the spread can become stale. If they are too large, the filter adapts too aggressively and may explain away the dislocation that the strategy is trying to trade. That is why these parameters are tuned monthly.
+
+## Monthly Workflow
+
+The monthly process is handled by `Tuner`.
+
+For each candidate pair, the tuner:
+
+1. Builds a trailing training window ending before the rebalance date.
+2. Tests each Kalman parameter set.
+3. Selects the Kalman parameters with the best filtered Sharpe/P&L behavior.
+4. Tunes the rolling z-score lookback.
+5. Tunes entry and exit z-score thresholds.
+6. Stores the tuned parameters and backtest diagnostics.
+
+At the universe level, `Tuner.tune_universe(...)` loops over all candidate pairs, tunes each one, filters weak candidates, and returns:
+
+```python
+{
+    "active_pairs": ...,
+    "tuned_params": ...,
+    "all_tuned_params": ...,
+    "tuners": ...,
+    "failures": ...,
+}
+```
+
+Those active pairs and tuned parameters are then passed into `PairsTradingStrategy`.
+
+## Daily Workflow
+
+The daily process is handled by `PairsTradingStrategy`.
+
+Each trading day:
+
+1. The Kalman state is advanced through the current date.
+2. The current spread and z-score are calculated.
+3. The pair is checked with a trailing cointegration gate.
+4. If cointegration passes, the residual is checked for mean reversion and half-life.
+5. A raw long/short/flat signal is generated from the z-score.
+6. The signal is scaled by spread volatility.
+7. Pair-level and portfolio-level exposure limits are applied.
+8. Transaction costs are estimated from turnover.
+
+The daily regime filters are intentionally conservative. A pair can be selected during monthly tuning but still sit flat on a particular day if the current trailing window does not pass the regime tests.
+
+## Backtest Configuration
+
+The main backtest lives in `backtest.ipynb` and currently uses:
+
+- backtest period: `2023-01-01` through `2025-12-31`
+- monthly retuning on the first trading day of each month
+- trailing tuning window: `756` calendar days, roughly three years
+- max active pairs: `5`
+- minimum tuning Sharpe filter: `0.0`
+- minimum tuning entries filter: `5`
+- daily regime lookback: `252` observations
+- cointegration p-value threshold: `0.10`
+- mean-reversion half-life bounds: `2` to `63` trading days
+- target spread volatility: `0.01`
+- max pair position: `1.0`
+- max gross exposure: `4.0`
+- transaction cost assumption: `1` basis point per unit of turnover
+- annual risk-free rate assumption for Sharpe: `4.0%`
+- daily risk-free rate: `(1 + 0.04) ** (1 / 252) - 1`
+- normalized capital base for return calculation: `1.0`
+
+The Sharpe ratio in the notebook is calculated from daily excess returns:
 
 ```text
-ou_z = (current_spread - ou_mu) / ou_sigma
+daily_return = daily_pnl / capital_base
+daily_excess_return = daily_return - daily_risk_free_rate
+sharpe = sqrt(252) * mean(daily_excess_return) / std(daily_return)
 ```
 
-This matters because the strategy is no longer assuming that every large rolling deviation is equally tradable. It checks whether the spread still looks mean reverting, how quickly it is expected to decay, and whether its estimated stationary volatility is reasonable.
+This makes the risk-free adjustment explicit. The P&L is still normalized spread P&L, not broker-account dollar P&L. A production system would need a more exact capital model, margin model, borrow model, financing model, and execution model.
 
-The current OU configuration uses a 252-day hedge lookback, a 378-day OU lookback, entry threshold of `1.0`, exit threshold of `0.75`, emergency stop of `3.9`, and half-life bounds from 1 to 60 trading days. A high positive `ou_z` triggers a short-spread trade: short `MA`, long `V`. A low negative `ou_z` triggers a long-spread trade: long `MA`, short `V`. Positions exit when the spread mean-reverts, hits the emergency stop, or fails the regime checks.
+## How To Run
 
-The notebook also calibrates regime filters using only pre-2020 data. These filters require high enough return correlation, stable rolling beta, acceptable OU volatility, and a reasonable half-life. This separation is important: thresholds are learned before the validation period, then tested from 2020 onward.
+Open and run `backtest.ipynb` from top to bottom.
 
-On the current local CSV data, the OU training period runs from March 19, 2008 through December 31, 2019. It produces a Sharpe ratio of about `1.03`, total return of about `46.1%`, maximum drawdown of about `-4.8%`, and 64 position changes. The validation period runs from January 2, 2020 through May 11, 2026. It produces a Sharpe ratio of about `1.52`, total return of about `88.8%`, maximum drawdown of about `-5.5%`, and 78 position changes.
+For script usage, the important import shape is:
 
-![OU signal and position](readme_assets/ou_signal_position.png)
+```python
+from tuning import Tuner
+from strategy import PairsTradingStrategy
 
-![Equity and drawdown](readme_assets/ou_equity_drawdown.png)
+monthly = Tuner.tune_universe(
+    pair_data=pair_data,
+    end_date="2022-12-31",
+    trailing_window_days=756,
+    max_pairs=5,
+)
 
-![Regime filters](readme_assets/ou_regime_filters.png)
+strategy = PairsTradingStrategy(
+    pair_data=pair_data,
+    tuned_params=monthly["tuned_params"],
+    active_pairs=monthly["active_pairs"],
+)
 
-These results are encouraging, but they are still backtest results. They do not fully model slippage, commissions, short borrow availability, tax effects, partial fills, or live order-book behavior.
-
-## Earlier Baseline
-
-Before the OU version, the project tested a simpler statistical arbitrage algorithm in [`basic_iteration/hyperparameter_tuning.ipynb`](basic_iteration/hyperparameter_tuning.ipynb). That model used a rolling hedge ratio, a rolling spread mean, and a rolling spread standard deviation. It entered when the ordinary z-score crossed an entry threshold and exited when it crossed back toward zero.
-
-The baseline was heavily tuned. The notebook swept lookback windows, entry thresholds, exit thresholds, and an emergency stop. The best lookback sweep in the 30-69 day region reached an in-sample Sharpe of about `1.05`. The best entry/exit threshold tile reached an in-sample Sharpe of about `1.25`, with `entry_z = 1.5` and `exit_z = 1.1`. The e-stop sweep peaked around `1.15`.
-
-![Baseline lookback sweep](readme_assets/baseline_lookback_sweep.png)
-
-The seaborn heatmaps below show why this was not fully satisfying. The profitable regions were present, but performance depended heavily on the chosen thresholds. The best tile was not enough evidence that the simple model was robust.
-
-![Baseline threshold heatmaps](readme_assets/baseline_threshold_heatmaps.png)
-
-![Baseline e-stop sweep](readme_assets/baseline_estop_sweep.png)
-
-After validation, the simple strategy was not excellent. The tuned baseline reached only about `0.58` Sharpe from 2020 onward, with about `33.0%` total return, `-11.2%` maximum drawdown, and 214 position changes. Adding regime and noise controls improved it only modestly to about `0.66` Sharpe, with about `33.8%` total return and `-10.3%` maximum drawdown.
-
-![Baseline validation equity](readme_assets/baseline_validation_equity.png)
-
-This is the main reason the project moved toward the OU process. The OU version gives the spread model a more explicit mean-reversion structure, adds half-life awareness, and uses OU stationary volatility rather than only a rolling sample standard deviation.
-
-## Manual Trading Notebook
-
-[`manual_trading_sim.ipynb`](manual_trading_sim.ipynb) connects the research logic to Alpaca paper trading in a controlled notebook format. It loads the same OU parameters, connects with `TradingClient`, requests daily Alpaca bars using the free/basic IEX feed, computes the latest signal, and builds an `order_plan_df`.
-
-Before submitting anything, the notebook shows the current shares, target shares, trade quantity, latest price, and trade notional for both symbols. With `PAPER = True`, any submitted order goes to Alpaca paper trading rather than live capital. This notebook is useful for inspecting one complete trading decision by hand.
-
-## Bot Entrypoint
-
-The deployable script version lives in [`Algorithmic trading/`](Algorithmic%20trading/). Run only:
-
-```bash
-.venv/bin/python "Algorithmic trading/bot.py"
+daily_decisions = strategy.run_day("2023-01-03")
 ```
 
-For a preview without submitting paper orders:
+The notebook version retunes automatically at each monthly rebalance date and accumulates the daily decisions into a portfolio-level backtest.
 
-```bash
-SUBMIT_ORDERS=false .venv/bin/python "Algorithmic trading/bot.py"
-```
+## Current Backtest Conclusion
 
-The best workflow is: research changes in `ou_validation.ipynb`, inspect live behavior in `manual_trading_sim.ipynb`, then schedule `bot.py` after the order plan looks correct.
+The current 2023-2025 backtest is directionally encouraging but not production-ready.
+
+Using the current notebook settings, the backtest runs from January 3, 2023 through December 31, 2025 and produces:
+
+- total normalized gross spread P&L: `0.250440`
+- transaction costs: `0.045001`
+- total normalized net spread P&L: `0.205440`
+- annualized net return on the normalized capital base: `6.8844%`
+- annualized net excess return after the 4% risk-free-rate assumption: `2.9620%`
+- gross excess Sharpe: `2.0675`
+- net excess Sharpe: `1.3877`
+- maximum drawdown: `-0.007701`
+- average gross exposure: `0.4582`
+- average active positions: `0.4588`
+- average regime pass rate: `18.56%`
+
+The strongest contributor was `V/MA`, which produced about `0.128829` net spread P&L after costs. Smaller positive contributors were `JPM/BAC`, `GOOG/GOOGL`, and `PEP/KO`. `AGG/BND` was approximately flat after costs, while `GLD/IAU`, `SPY/IVV`, and `XOM/CVX` did not materially contribute in the observed run. Several pairs were selected at times but spent many days flat because the daily regime filters failed. This is expected and supports the core design choice: pair validity is time-varying, and the strategy should not force trades when the relationship is not currently strong.
+
+The result should be interpreted cautiously. The backtest uses simplified normalized spread P&L, a simple 1 bp turnover cost model, and a fixed 4% annual risk-free-rate assumption for excess Sharpe. It does not yet model slippage, bid/ask spreads, borrow costs, margin requirements, financing rates, corporate actions beyond adjusted closes, taxes, partial fills, or intraday execution quality.
+
+The main conclusion is that the framework is viable as a research architecture: monthly tuning plus daily regime-aware execution is a better design than selecting a pair once and assuming it remains valid forever. The positive 2023-2025 net excess Sharpe suggests the idea is worth further research, but the next step is not to declare the strategy finished. The next step is to harden the backtest with realistic capital accounting, execution assumptions, broader out-of-sample validation, and cached monthly tuning so repeated experiments run faster.
