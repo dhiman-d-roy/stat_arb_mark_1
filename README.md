@@ -218,19 +218,34 @@ The current 2023-2025 backtest is directionally encouraging but not production-r
 
 Using the current notebook settings, the backtest runs from January 3, 2023 through December 31, 2025 and produces:
 
-- total normalized gross spread P&L: `0.250440`
-- transaction costs: `0.045001`
-- total normalized net spread P&L: `0.205440`
-- annualized net return on the normalized capital base: `6.8844%`
-- annualized net excess return after the 4% risk-free-rate assumption: `2.9620%`
-- gross excess Sharpe: `2.0675`
-- net excess Sharpe: `1.3877`
-- maximum drawdown: `-0.007701`
-- average gross exposure: `0.4582`
-- average active positions: `0.4588`
-- average regime pass rate: `18.56%`
+- total normalized gross spread P&L: `0.543799`
+- transaction costs: `0.050106`
+- total normalized net spread P&L: `0.493693`
+- annualized net return on the normalized capital base: `16.5440%`
+- annualized net excess return after the 4% risk-free-rate assumption: `12.6216%`
+- gross excess Sharpe: `2.9992`
+- net excess Sharpe: `2.6653`
+- maximum drawdown: `-0.019116`
+- average gross exposure: `0.5948`
+- average active positions: `0.5971`
+- average regime pass rate: `24.57%`
 
-The strongest contributor was `V/MA`, which produced about `0.128829` net spread P&L after costs. Smaller positive contributors were `JPM/BAC`, `GOOG/GOOGL`, and `PEP/KO`. `AGG/BND` was approximately flat after costs, while `GLD/IAU`, `SPY/IVV`, and `XOM/CVX` did not materially contribute in the observed run. Several pairs were selected at times but spent many days flat because the daily regime filters failed. This is expected and supports the core design choice: pair validity is time-varying, and the strategy should not force trades when the relationship is not currently strong.
+![Backtest cumulative P&L, drawdown, and exposure](readme_assets/backtest_performance.png)
+
+The strongest contributor was `JPM/BAC`, which produced about `0.215787` net spread P&L after costs. Other positive contributors were `V/MA`, `PEP/KO`, `XOM/CVX`, `GOOG/GOOGL`, and `AGG/BND`. `GLD/IAU` and `SPY/IVV` were selected at times but did not materially contribute in the observed run. Several pairs spent many days flat because the daily regime filters failed. This is expected and supports the core design choice: pair validity is time-varying, and the strategy should not force trades when the relationship is not currently strong.
+
+Pair-level net spread P&L from the saved notebook output:
+
+| Pair | Net P&L | Active days | Regime pass rate |
+| --- | ---: | ---: | ---: |
+| `JPM/BAC` | `0.215787` | `71` | `40.06%` |
+| `V/MA` | `0.118445` | `97` | `33.91%` |
+| `PEP/KO` | `0.077080` | `35` | `19.28%` |
+| `XOM/CVX` | `0.041019` | `26` | `31.62%` |
+| `GOOG/GOOGL` | `0.039392` | `180` | `62.93%` |
+| `AGG/BND` | `0.001969` | `40` | `15.17%` |
+| `GLD/IAU` | `0.000000` | `0` | `0.18%` |
+| `SPY/IVV` | `0.000000` | `0` | `0.00%` |
 
 The result should be interpreted cautiously. The backtest uses simplified normalized spread P&L, a simple 1 bp turnover cost model, and a fixed 4% annual risk-free-rate assumption for excess Sharpe. It does not yet model slippage, bid/ask spreads, borrow costs, margin requirements, financing rates, corporate actions beyond adjusted closes, taxes, partial fills, or intraday execution quality.
 
