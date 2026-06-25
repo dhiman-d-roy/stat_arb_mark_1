@@ -41,10 +41,6 @@ Runs the full strategy from the start of 2023 through the end of 2025. It retune
 
 Research notebook for screening pairs, checking cointegration, checking mean reversion, and experimenting with Kalman-spread behavior.
 
-`hyperparameter_tuning.ipynb`
-
-Notebook version of the tuning workflow. The reusable implementation now lives in `tuning.py`, so this notebook is mostly useful for interactive exploration.
-
 `downloader.ipynb`
 
 Data download notebook for updating the CSV files in `Data/`.
@@ -159,7 +155,7 @@ The main backtest lives in `backtest.ipynb` and currently uses:
 
 - backtest period: `2023-01-01` through `2025-12-31`
 - monthly retuning on the first trading day of each month
-- trailing tuning window: `756` calendar days, roughly three years
+- trailing tuning window: `252` calendar days
 - max active pairs: `5`
 - minimum tuning Sharpe filter: `0.0`
 - minimum tuning entries filter: `5`
@@ -197,7 +193,7 @@ from strategy import PairsTradingStrategy
 monthly = Tuner.tune_universe(
     pair_data=pair_data,
     end_date="2022-12-31",
-    trailing_window_days=756,
+    trailing_window_days=252,
     max_pairs=5,
 )
 
