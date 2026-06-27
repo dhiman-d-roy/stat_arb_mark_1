@@ -1,4 +1,4 @@
-# DGQT Statistical Arbitrage Research
+# Statistical Arbitrage Research
 
 This repository researches a systematic pairs-trading strategy for liquid equity and ETF pairs. The current implementation separates the workflow into two layers:
 
